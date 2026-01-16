@@ -3,7 +3,7 @@ description: Installs Synth CLI (synthetic data generator) on macOS or Windows.
 name: install_synth
 argument-hint: Ask me to install or fix Synth CLI
 tools: ['run_in_terminal', 'read_file']
-model: Claude Sonnet 4
+model: Claude Opus 4.5
 handoffs:
   - label: Generate Synthetic Data
     agent: generate_dataset_synth

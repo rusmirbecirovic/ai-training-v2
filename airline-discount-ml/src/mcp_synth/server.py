@@ -177,6 +177,234 @@ def preview_table_head(req: PreviewHeadRequest) -> PreviewHeadResponse:
 
     return PreviewHeadResponse(path=str(resolved), rows=rows)
 
+class SynthStatsRequest(BaseModel):
+    """Request to compute statistics on a generated data file."""
+    path: str = Field(
+        default="data/synthetic_output/generated_data.json",
+        description="Path to JSON/NDJSON/CSV file to analyze"
+    )
+    log_file: str = Field(default="", description="Optional path to save statistics output")
+
+
+class ColumnStats(BaseModel):
+    """Statistics for a single column."""
+    column: str
+    dtype: str
+    count: int
+    null_count: int
+    unique_count: int
+    # Numeric stats (optional)
+    min_val: Any = None
+    max_val: Any = None
+    mean_val: float | None = None
+    # Categorical stats (optional)
+    top_values: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class CollectionStats(BaseModel):
+    """Statistics for a nested collection."""
+    row_count: int
+    columns: Dict[str, Any]
+
+
+class SynthStatsResponse(BaseModel):
+    """Response with data statistics."""
+    path: str
+    total_rows: int
+    total_columns: int
+    columns: List[ColumnStats] = Field(default_factory=list)
+    # For nested JSON (like Synth output with multiple collections)
+    collections: Dict[str, CollectionStats] = Field(default_factory=dict)
+    collection_names: List[str] = Field(default_factory=list)
+
+
+def synth_stats(req: SynthStatsRequest) -> SynthStatsResponse:
+    """Compute statistics on a data file (JSON/NDJSON/CSV)."""
+    p = Path(req.path)
+    
+    # Security: prevent directory traversal and restrict to safe paths
+    try:
+        resolved = p.resolve()
+        allowed_prefixes = [
+            Path("data").resolve(),
+            Path("synth_models").resolve(),
+        ]
+        if not any(str(resolved).startswith(str(prefix)) for prefix in allowed_prefixes):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: path must be under data/ or synth_models/"
+            )
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {e}") from e
+    
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {resolved}")
+    
+    rows: List[dict] = []
+    
+    # Parse the file
+    try:
+        text = resolved.read_text(encoding="utf-8")
+        text_stripped = text.strip()
+        if text_stripped.startswith("{"):
+            # Could be a single object or an object with nested collections
+            data = json.loads(text_stripped)
+            if isinstance(data, dict):
+                # Check if it has nested arrays (like Synth output with discounts, passengers, routes)
+                nested_arrays = {k: v for k, v in data.items() if isinstance(v, list)}
+                if nested_arrays:
+                    # Return stats for each nested collection
+                    all_stats: Dict[str, Any] = {}
+                    total_rows = 0
+                    collection_names: List[str] = []
+                    
+                    for collection_name, collection_data in nested_arrays.items():
+                        if collection_data and isinstance(collection_data[0], dict):
+                            coll_rows = collection_data
+                            total_rows += len(coll_rows)
+                            collection_names.append(collection_name)
+                            columns = list(coll_rows[0].keys())
+                            
+                            collection_stats: Dict[str, Any] = {"row_count": len(coll_rows), "columns": {}}
+                            for col in columns:
+                                values = [row.get(col) for row in coll_rows if row.get(col) is not None]
+                                col_stats: Dict[str, Any] = {
+                                    "non_null_count": len(values),
+                                    "null_count": len(coll_rows) - len(values),
+                                }
+                                
+                                # Try numeric stats
+                                numeric_values = []
+                                for v in values:
+                                    try:
+                                        if isinstance(v, (int, float)):
+                                            numeric_values.append(float(v))
+                                        elif isinstance(v, str):
+                                            numeric_values.append(float(v))
+                                    except (ValueError, TypeError):
+                                        pass
+                                
+                                if len(numeric_values) == len(values) and numeric_values:
+                                    col_stats["type"] = "numeric"
+                                    col_stats["min"] = min(numeric_values)
+                                    col_stats["max"] = max(numeric_values)
+                                    col_stats["mean"] = sum(numeric_values) / len(numeric_values)
+                                    col_stats["unique_count"] = len(set(numeric_values))
+                                else:
+                                    # String stats
+                                    str_values = [str(v) for v in values]
+                                    col_stats["type"] = "string"
+                                    col_stats["unique_count"] = len(set(str_values))
+                                    if str_values:
+                                        col_stats["min_length"] = min(len(s) for s in str_values)
+                                        col_stats["max_length"] = max(len(s) for s in str_values)
+                                        col_stats["sample_values"] = list(set(str_values))[:5]
+                                
+                                collection_stats["columns"][col] = col_stats
+                            
+                            all_stats[collection_name] = CollectionStats(
+                                row_count=len(coll_rows),
+                                columns=collection_stats["columns"]
+                            )
+                    
+                    return SynthStatsResponse(
+                        path=str(resolved),
+                        total_rows=total_rows,
+                        total_columns=len(collection_names),
+                        collection_names=collection_names,
+                        collections=all_stats
+                    )
+                else:
+                    rows = [data]
+            else:
+                rows = [data]
+        elif text_stripped.startswith("["):
+            data = json.loads(text_stripped)
+            if isinstance(data, list):
+                rows = data
+            else:
+                rows = [data]
+        elif "\n" in text_stripped and "{" in text_stripped:
+            # NDJSON
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            for ln in lines:
+                rows.append(json.loads(ln))
+        elif resolved.suffix.lower() == ".csv":
+            import csv
+            with resolved.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format for statistics")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Could not parse file: {e}") from e
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read file: {e}") from e
+    
+    if not rows:
+        return SynthStatsResponse(
+            path=str(resolved),
+            total_rows=0,
+            total_columns=0,
+            columns=[]
+        )
+    
+    # Gather all unique columns
+    all_columns: set[str] = set()
+    for row in rows:
+        all_columns.update(row.keys())
+    all_columns_list = sorted(all_columns)
+    
+    column_stats: List[ColumnStats] = []
+    
+    for col in all_columns_list:
+        values = [row.get(col) for row in rows]
+        non_null_values = [v for v in values if v is not None]
+        null_count = len(values) - len(non_null_values)
+        unique_values = set(str(v) for v in non_null_values)
+        
+        # Determine dtype
+        numeric_values: List[float] = []
+        for v in non_null_values:
+            if isinstance(v, (int, float)):
+                numeric_values.append(float(v))
+            elif isinstance(v, str):
+                try:
+                    numeric_values.append(float(v))
+                except ValueError:
+                    pass
+        
+        is_numeric = len(numeric_values) == len(non_null_values) and len(non_null_values) > 0
+        
+        col_stat = ColumnStats(
+            column=col,
+            dtype="numeric" if is_numeric else "string",
+            count=len(non_null_values),
+            null_count=null_count,
+            unique_count=len(unique_values),
+        )
+        
+        if is_numeric and numeric_values:
+            col_stat.min_val = min(numeric_values)
+            col_stat.max_val = max(numeric_values)
+            col_stat.mean_val = sum(numeric_values) / len(numeric_values)
+        else:
+            # Top 5 most frequent values
+            from collections import Counter
+            value_counts = Counter(str(v) for v in non_null_values)
+            top_5 = value_counts.most_common(5)
+            col_stat.top_values = [{"value": val, "count": cnt} for val, cnt in top_5]
+        
+        column_stats.append(col_stat)
+    
+    return SynthStatsResponse(
+        path=str(resolved),
+        total_rows=len(rows),
+        total_columns=len(all_columns_list),
+        columns=column_stats
+    )
+
+
 class ExportArchiveRequest(BaseModel):
     """Request to export output files as a zip archive."""
     source_dir: str = Field(
@@ -368,6 +596,21 @@ EXPORT_ARCHIVE_SCHEMA: Dict[str, Any] = {
     "required": []
 }
 
+SYNTH_STATS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "path": {
+            "type": "string",
+            "description": "Path to JSON/NDJSON/CSV file to analyze (default: data/synthetic_output/generated_data.json)"
+        },
+        "log_file": {
+            "type": "string",
+            "description": "Optional path to save statistics output"
+        }
+    },
+    "required": []
+}
+
 def mcp_ok(id_: Any, result: Any) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 
@@ -430,6 +673,11 @@ async def mcp(request: Request):
                     "name": "export_archive",
                     "description": "Zip output files into a compressed archive",
                     "inputSchema": EXPORT_ARCHIVE_SCHEMA,
+                },
+                {
+                    "name": "synth_stats",
+                    "description": "Compute statistics on a generated data file (row count, column stats, min/max/mean for numeric, top values for categorical)",
+                    "inputSchema": SYNTH_STATS_SCHEMA,
                 },
             ]
         })
@@ -542,6 +790,52 @@ async def mcp(request: Request):
                     f.write(text_output)
                 
                 text_output += f"\n\n💾 Log saved to: {log_file}"
+                return mcp_ok(rpc_id, {"content": [
+                    {"type": "text", "text": text_output},
+                    {"type": "json", "data": data}
+                ]})
+            elif name == "synth_stats":
+                req = SynthStatsRequest(**args)
+                resp = synth_stats(req)
+                data = resp.model_dump()
+                
+                # Format statistics output
+                lines = [
+                    f"📊 Data Statistics for: {data['path']}",
+                    f"",
+                    f"📈 Summary:",
+                    f"  • Total rows: {data['total_rows']:,}",
+                    f"  • Total columns: {data['total_columns']}",
+                    f"",
+                    f"📋 Column Details:",
+                ]
+                
+                for col_stat in data['columns']:
+                    lines.append(f"")
+                    lines.append(f"  [{col_stat['column']}] ({col_stat['dtype']})")
+                    lines.append(f"    Count: {col_stat['count']:,} | Nulls: {col_stat['null_count']} | Unique: {col_stat['unique_count']}")
+                    
+                    if col_stat['dtype'] == 'numeric' and col_stat['min_val'] is not None:
+                        mean_str = f"{col_stat['mean_val']:.2f}" if col_stat['mean_val'] is not None else "N/A"
+                        lines.append(f"    Min: {col_stat['min_val']} | Max: {col_stat['max_val']} | Mean: {mean_str}")
+                    elif col_stat['top_values']:
+                        top_str = ", ".join(f"{tv['value']} ({tv['count']})" for tv in col_stat['top_values'][:3])
+                        lines.append(f"    Top values: {top_str}")
+                
+                text_output = "\n".join(lines)
+                
+                # Save stats output
+                if req.log_file:
+                    log_file = Path(req.log_file)
+                else:
+                    stats_path = Path(req.path)
+                    log_file = stats_path.parent / f"{stats_path.stem}_stats.txt"
+                
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.write(text_output)
+                
+                text_output += f"\n\n💾 Stats saved to: {log_file}"
                 return mcp_ok(rpc_id, {"content": [
                     {"type": "text", "text": text_output},
                     {"type": "json", "data": data}

@@ -1,7 +1,18 @@
-```chatagent
 ---
-description: 'Installs Synth CLI (synthetic data generator) on macOS or Windows.'
-tools: ['run_in_terminal']
+description: Installs Synth CLI (synthetic data generator) on macOS or Windows.
+name: install_synth
+argument-hint: Ask me to install or fix Synth CLI
+tools: []
+model: Claude Opus 4.5
+handoffs:
+  - label: Generate Synthetic Data
+    agent: generate_dataset_synth
+    prompt: Generate 1000 synthetic airline records for testing.
+    send: true
+  - label: Setup Environment
+    agent: setup_env
+    prompt: Set up the Python environment for airline-discount-ml and activate it if not done.
+    send: false
 ---
 # Synth Install Agent
 
