@@ -83,8 +83,7 @@ def test_fit_validates_empty_X():
 
 
 def test_fit_validates_missing_columns(synthetic_data):
-    """Test fit raises on missing required columns with explicit error
-    message."""
+    """Test fit raises on missing required columns."""
     _, y = synthetic_data
     X_bad = pd.DataFrame({"distance_km": [3000]})
 
@@ -95,8 +94,7 @@ def test_fit_validates_missing_columns(synthetic_data):
 
 
 def test_predict_validates_missing_columns(synthetic_data):
-    """Test predict raises on missing required columns with explicit error
-    message."""
+    """Test predict raises on missing required columns."""
     X, y = synthetic_data
     X_bad = pd.DataFrame({
         "distance_km": [3000],
