@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Iterable, List
+from typing import List, Self
 
 import joblib
 import numpy as np
@@ -66,7 +66,9 @@ class DiscountPredictor:
             raise ValueError("X must be a pandas DataFrame.")
         if X.empty:
             raise ValueError("X is empty.")
-
+        missing = set(REQUIRED_FEATURES) - set(X.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
 
     @staticmethod
     def _validate_y(y: pd.Series) -> None:
@@ -75,7 +77,26 @@ class DiscountPredictor:
         if y.empty:
             raise ValueError("y is empty.")
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "DiscountPredictor":
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> Self:
+        """
+        Fit the discount prediction model.
+
+        Args:
+            X: Training features DataFrame with required columns:
+               ['distance_km', 'history_trips', 'avg_spend',
+                'route_id', 'origin', 'destination']
+            y: Training target Series (discount values)
+
+        Returns:
+            Self: The fitted DiscountPredictor instance for method
+                  chaining
+
+        Raises:
+            ValueError: If X is not a DataFrame, is empty, or missing
+                        required columns
+            ValueError: If y is not a Series or is empty
+            RuntimeError: If the pipeline is not initialized
+        """
         self._validate_X(X)
         self._validate_y(y)
         if self._pipeline is None:
@@ -87,6 +108,23 @@ class DiscountPredictor:
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
+        """
+        Generate discount predictions for input features.
+
+        Args:
+            X: Features DataFrame with required columns:
+               ['distance_km', 'history_trips', 'avg_spend',
+                'route_id', 'origin', 'destination']
+
+        Returns:
+            pd.Series: Predicted discount values with the same index as X,
+                       named 'discount_value'
+
+        Raises:
+            RuntimeError: If the model has not been fitted yet
+            ValueError: If X is not a DataFrame, is empty, or missing
+                        required columns
+        """
         if not self._fitted or self._pipeline is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
         self._validate_X(X)
@@ -94,6 +132,19 @@ class DiscountPredictor:
         return pd.Series(preds, index=X.index, name="discount_value")
 
     def save(self, path: str | Path) -> None:
+        """
+        Save the fitted model to disk.
+
+        Args:
+            path: File path where the model should be saved
+                  (directory will be created if needed)
+
+        Returns:
+            None
+
+        Raises:
+            RuntimeError: If attempting to save an unfitted model
+        """
         if not self._fitted or self._pipeline is None:
             raise RuntimeError("Cannot save an unfitted model.")
         path = Path(path)
@@ -101,7 +152,20 @@ class DiscountPredictor:
         joblib.dump({"pipeline": self._pipeline, "version": 1}, path)
 
     @classmethod
-    def load(cls, path: str | Path) -> "DiscountPredictor":
+    def load(cls, path: str | Path) -> Self:
+        """
+        Load a fitted model from disk.
+
+        Args:
+            path: File path to the saved model
+
+        Returns:
+            Self: A new DiscountPredictor instance with the loaded pipeline
+
+        Raises:
+            FileNotFoundError: If the model file does not exist
+            Exception: If the model file is corrupted or incompatible
+        """
         blob = joblib.load(Path(path))
         obj = cls()
         obj._pipeline = blob["pipeline"]

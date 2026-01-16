@@ -83,14 +83,31 @@ def test_fit_validates_empty_X():
 
 
 def test_fit_validates_missing_columns(synthetic_data):
-    """Test fit raises on missing required columns."""
+    """Test fit raises on missing required columns with explicit error
+    message."""
     _, y = synthetic_data
     X_bad = pd.DataFrame({"distance_km": [3000]})
-    
+
     model = DiscountPredictor()
-    
-    with pytest.raises(ValueError, match="column is not a column of the dataframe"):
+
+    with pytest.raises(ValueError, match="Missing required columns"):
         model.fit(X_bad, y.iloc[:1])
+
+
+def test_predict_validates_missing_columns(synthetic_data):
+    """Test predict raises on missing required columns with explicit error
+    message."""
+    X, y = synthetic_data
+    X_bad = pd.DataFrame({
+        "distance_km": [3000],
+        "history_trips": [5]
+    })
+
+    model = DiscountPredictor()
+    model.fit(X, y)
+
+    with pytest.raises(ValueError, match="Missing required columns"):
+        model.predict(X_bad)
 
 
 def test_save_load_roundtrip(synthetic_data):
